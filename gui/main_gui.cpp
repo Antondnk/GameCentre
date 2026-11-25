@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QDir>
 #include <QMessageBox>
 #include <QStringList>
 
@@ -8,16 +9,18 @@
 #include "GameCenter.h"
 #include "LoginDialog.h"
 #include "MainWindow.h"
+#include "AppSettings.h"
 #include "Theme.h"
 #include "TimeUtils.h"
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     QApplication::setStyle("Fusion");
-    app.setStyleSheet(app_stylesheet());
-
     const QStringList args = QCoreApplication::arguments();
     const std::string data_dir = args.size() > 1 ? args.at(1).toStdString() : "data";
+
+    QDir().mkpath(QString::fromStdString(data_dir));
+    apply_theme(AppSettings::load(settings_file_path(data_dir)));
 
     gc::GameCenter center;
     try {

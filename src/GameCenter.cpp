@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 
 #include "EventPlanner.h"
 #include "Exceptions.h"
@@ -14,6 +15,7 @@ namespace {
 
 constexpr int kMinPasswordLength = 4;
 constexpr int kAdultAge = 18;
+constexpr std::size_t kMaxActivityLines = 5000;
 
 std::string file_path(const std::string& directory, const std::string& name) {
     return (std::filesystem::path(directory) / name).string();
@@ -44,6 +46,9 @@ std::shared_ptr<User> GameCenter::authenticate(const std::string& login, const s
 
 std::shared_ptr<Client> GameCenter::register_client(const std::string& login, const std::string& password,
                                                     const std::string& full_name, long long birth_days) {
+    if (util::sanitize_field(login).empty() || util::sanitize_field(full_name).empty()) {
+        throw InvalidInputException("Логин и ФИО не могут быть пустыми");
+    }
     require_free_login(login);
     if (static_cast<int>(password.size()) < kMinPasswordLength) {
         throw InvalidInputException("Пароль должен содержать не менее 4 символов");
@@ -93,22 +98,72 @@ void GameCenter::deposit(int client_id, const Money& amount, Minutes now) {
     if (amount.cents() <= 0) {
         throw InvalidInputException("Сумма пополнения должна быть положительной");
     }
-    get_client(client_id)->add_funds(amount);
-    log_.record(client_id, now, TransactionType::Deposit, amount, "Пополнение баланса");
+    const auto client = get_client(client_id);
+    client->add_funds(amount);
+    log_.record(client_id, now, TransactionType::Deposit, amount, "Пополнение баланса", "deposit");
+    log_activity(now, "Пополнение: " + client->login() + " +" + amount.to_string());
 }
 
-void GameCenter::withdraw(int client_id, const Money& amount, const std::string& reason, Minutes now) {
+void GameCenter::withdraw(int client_id, const Money& amount, const std::string& reason, Minutes now,
+                          const std::string& category) {
     if (amount.cents() <= 0) {
         throw InvalidInputException("Сумма списания должна быть положительной");
     }
     get_client(client_id)->charge(amount);  // бросает InsufficientFundsException
-    log_.record(client_id, now, TransactionType::Withdrawal, amount, reason);
+    log_.record(client_id, now, TransactionType::Withdrawal, amount, reason, category);
 }
 
 Money GameCenter::quote(const Client& client, const Resource& resource, const TimeSlot& slot,
                         int guests) const {
     const Money base = resource.calculate_cost(slot, guests);
-    return base * (1.0 - client.discount_percent() / 100.0);
+    return base * (1.0 - effective_discount(client) / 100.0);
+}
+
+// ---------------------------------------------------------------- Лояльность
+
+Money GameCenter::total_spent(int client_id) const {
+    Money total;
+    for (const auto& [id, entry] : log_.entries()) {
+        if (entry->client_id() != client_id) {
+            continue;
+        }
+        if (entry->type() == TransactionType::Withdrawal) {
+            total += entry->amount();
+        } else if (entry->type() == TransactionType::Refund) {
+            total -= entry->amount();
+        }
+    }
+    return total;
+}
+
+LoyaltyLevel GameCenter::loyalty_level(int client_id) const {
+    struct Tier {
+        const char* name;
+        long long threshold_cents;
+        int discount;
+    };
+    static const Tier tiers[] = {{"Новичок", 0, 0}, {"Бронза", 10000, 3}, {"Серебро", 30000, 5}, {"Золото", 70000, 10}};
+    constexpr std::size_t kTierCount = sizeof(tiers) / sizeof(tiers[0]);
+
+    LoyaltyLevel level;
+    level.spent = total_spent(client_id);
+    std::size_t current = 0;
+    for (std::size_t i = 0; i < kTierCount; ++i) {
+        if (level.spent.cents() >= tiers[i].threshold_cents) {
+            current = i;
+        }
+    }
+    level.name = tiers[current].name;
+    level.discount_percent = tiers[current].discount;
+    if (current + 1 < kTierCount) {
+        level.next_threshold = Money(tiers[current + 1].threshold_cents);
+        level.next_name = tiers[current + 1].name;
+    }
+    return level;
+}
+
+int GameCenter::effective_discount(const Client& client) const {
+    return std::max(client.discount_percent(), loyalty_level(client.id()).discount_percent);
 }
 
 // ----------------------------------------------------------------- Ресурсы
@@ -125,6 +180,10 @@ void GameCenter::remove_resource(int resource_id) {
         }
     }
     resources_.remove_item(resource_id);
+}
+
+void GameCenter::set_resource_price(int resource_id, const Money& price) {
+    resources_.get(resource_id)->set_base_price(price);
 }
 
 ResourceStatus GameCenter::get_device_status(int resource_id, Minutes now) const {
@@ -177,6 +236,46 @@ bool GameCenter::is_resource_free(int resource_id, const TimeSlot& slot, int ign
     return true;
 }
 
+// ------------------------------------------------------------------- Магазин
+
+std::shared_ptr<Product> GameCenter::add_product(const std::string& name, const std::string& category,
+                                                 const Money& price, int stock) {
+    if (util::sanitize_field(name).empty() || price.cents() < 0 || stock < 0) {
+        throw InvalidInputException("Укажите название товара, неотрицательные цену и остаток");
+    }
+    auto product = std::make_shared<Product>(products_.next_id(), name, category, price, stock);
+    products_.add_item(product);
+    return product;
+}
+
+void GameCenter::restock_product(int product_id, int quantity) {
+    products_.get(product_id)->add_stock(quantity);
+}
+
+void GameCenter::remove_product(int product_id) {
+    products_.remove_item(product_id);
+}
+
+Money GameCenter::buy_product(int client_id, int product_id, int quantity, Minutes now) {
+    if (quantity < 1) {
+        throw InvalidInputException("Количество должно быть не меньше 1");
+    }
+    const auto client = get_client(client_id);
+    const auto product = products_.get(product_id);
+    if (product->stock() < quantity) {
+        throw OutOfStockException("Товара \"" + product->name() + "\" недостаточно: осталось " +
+                                  std::to_string(product->stock()));
+    }
+    const Money total = product->price() * (quantity * (1.0 - effective_discount(*client) / 100.0));
+    withdraw(client_id, total, "Покупка: " + product->name() + " x" + std::to_string(quantity), now, "shop");
+    product->remove_stock(quantity);
+    orders_.add_item(std::make_shared<Order>(orders_.next_id(), client_id, now, product->name(),
+                                             product->category(), quantity, total));
+    log_activity(now, "Покупка: " + client->login() + " - " + product->name() + " x" + std::to_string(quantity) +
+                          " (" + total.to_string() + ")");
+    return total;
+}
+
 // ------------------------------------------------------ Возрастные правила
 
 void GameCenter::check_age_validity(const Client& client, const TimeSlot& slot) {
@@ -221,8 +320,10 @@ Money GameCenter::start_session(int client_id, int resource_id, int minutes, int
     }
 
     const Money cost = quote(*client, *resource, slot, guests);
-    withdraw(client_id, cost, "Сеанс: " + resource->name(), now);
+    withdraw(client_id, cost, "Сеанс: " + resource->name(), now, "session");
     resource->occupy_until(slot.end());
+    log_activity(now, "Сеанс: " + client->login() + " - " + resource->name() + " на " + std::to_string(minutes) +
+                          " мин (" + cost.to_string() + ")");
     return cost;
 }
 
@@ -246,9 +347,12 @@ std::shared_ptr<Booking> GameCenter::create_booking(int client_id, int resource_
     }
 
     const Money price = quote(*client, *resource, slot, guests);
-    withdraw(client_id, price, "Бронь: " + resource->name(), now);
+    withdraw(client_id, price, "Бронь: " + resource->name(), now, "booking");
     auto booking = std::make_shared<Booking>(bookings_.next_id(), client_id, resource_id, slot, guests, price);
     bookings_.add_item(booking);
+    log_activity(now, "Бронь #" + std::to_string(booking->id()) + ": " + client->login() + " - " +
+                          resource->name() + ", " + timeutil::format_datetime(slot.start()) + " (" +
+                          price.to_string() + ")");
     return booking;
 }
 
@@ -275,6 +379,7 @@ Money GameCenter::cancel_booking(int booking_id, int requester_id, Minutes now) 
         log_.record(booking->client_id(), now, TransactionType::Refund, refund,
                     "Возврат за отмену брони #" + std::to_string(booking_id));
     }
+    log_activity(now, "Отмена брони #" + std::to_string(booking_id) + ", возврат " + refund.to_string());
     bookings_.remove_item(booking_id);
     return refund;
 }
@@ -307,10 +412,22 @@ std::shared_ptr<EventBooking> GameCenter::create_event_booking(int client_id, co
         throw BookingConflictException("Конфликт расписания: " + conflicts.front());
     }
 
-    withdraw(client_id, timeline.total, "Мероприятие: " + event_name, now);
+    withdraw(client_id, timeline.total, "Мероприятие: " + event_name, now, "event");
     auto booking = std::make_shared<EventBooking>(bookings_.next_id(), client_id, event_name, guests, timeline);
     bookings_.add_item(booking);
+    log_activity(now, "Мероприятие #" + std::to_string(booking->id()) + " \"" + booking->event_name() + "\": " +
+                          client->login() + ", " + timeutil::format_datetime(span.start()) + " (" +
+                          timeline.total.to_string() + ")");
     return booking;
+}
+
+// ------------------------------------------------------------------ Журнал
+
+void GameCenter::log_activity(Minutes now, const std::string& text) {
+    activity_.push_back("[" + timeutil::format_datetime(now) + "] " + text);
+    if (activity_.size() > kMaxActivityLines) {
+        activity_.erase(activity_.begin(), activity_.begin() + static_cast<std::ptrdiff_t>(activity_.size() - kMaxActivityLines));
+    }
 }
 
 // ------------------------------------------------------------------ Хранение
@@ -320,7 +437,17 @@ void GameCenter::save_all(const std::string& directory) const {
     users_.save_to_file(file_path(directory, "users.txt"));
     resources_.save_to_file(file_path(directory, "resources.txt"));
     bookings_.save_to_file(file_path(directory, "bookings.txt"));
+    products_.save_to_file(file_path(directory, "products.txt"));
+    orders_.save_to_file(file_path(directory, "orders.txt"));
     log_.entries().save_to_file(file_path(directory, "transactions.txt"));
+
+    std::ofstream activity(file_path(directory, "activity.log"), std::ios::trunc);
+    if (!activity) {
+        throw FileFormatException("Не удалось записать activity.log");
+    }
+    for (const std::string& line : activity_) {
+        activity << line << '\n';
+    }
 }
 
 bool GameCenter::load_all(const std::string& directory) {
@@ -330,7 +457,54 @@ bool GameCenter::load_all(const std::string& directory) {
     resources_.load_from_file(file_path(directory, "resources.txt"), make_resource);
     bookings_.load_from_file(file_path(directory, "bookings.txt"), make_booking);
     log_.entries().load_from_file(file_path(directory, "transactions.txt"), make_transaction);
+    const bool had_shop = products_.load_from_file(file_path(directory, "products.txt"), make_product);
+    orders_.load_from_file(file_path(directory, "orders.txt"), make_order);
+
+    activity_.clear();
+    std::ifstream activity(file_path(directory, "activity.log"));
+    std::string line;
+    while (std::getline(activity, line)) {
+        if (!line.empty()) {
+            activity_.push_back(line);
+        }
+    }
+
+    // Данные из старой версии: добавляем новые зоны и товары один раз.
+    if (!had_shop) {
+        seed_extra_resources();
+        seed_default_products();
+        save_all(directory);
+    }
     return true;
+}
+
+void GameCenter::seed_extra_resources() {
+    for (int i = 1; i <= 2; ++i) {
+        add_resource(std::make_shared<VRZone>(resources_.next_id(), "VR-арена " + std::to_string(i),
+                                              Money::from_double(15), 12, 60, 4, 4));
+    }
+    for (int i = 1; i <= 3; ++i) {
+        add_resource(std::make_shared<ConsoleZone>(resources_.next_id(), "PS5-0" + std::to_string(i),
+                                                   Money::from_double(8), 4, "PlayStation 5"));
+    }
+    for (int i = 1; i <= 2; ++i) {
+        add_resource(std::make_shared<BilliardsTable>(resources_.next_id(), "Бильярд " + std::to_string(i),
+                                                      Money::from_double(14), 4));
+    }
+}
+
+void GameCenter::seed_default_products() {
+    add_product("Вода 0.5 л", "Напитки", Money::from_double(1.5), 60);
+    add_product("Cola 0.5 л", "Напитки", Money::from_double(2.5), 50);
+    add_product("Энергетик", "Напитки", Money::from_double(3.5), 40);
+    add_product("Чай / кофе", "Напитки", Money::from_double(2.0), 80);
+    add_product("Пицца (кусок)", "Еда", Money::from_double(4.0), 30);
+    add_product("Бургер", "Еда", Money::from_double(6.5), 25);
+    add_product("Попкорн", "Еда", Money::from_double(3.0), 40);
+    add_product("Чипсы", "Еда", Money::from_double(2.5), 45);
+    add_product("Наушники (аренда на день)", "Аксессуары", Money::from_double(5.0), 20);
+    add_product("Игровая мышь (аренда на день)", "Аксессуары", Money::from_double(4.0), 15);
+    add_product("Фото на память", "Услуги", Money::from_double(5.0), 999);
 }
 
 void GameCenter::seed_demo_data(Minutes now) {
@@ -361,6 +535,9 @@ void GameCenter::seed_demo_data(Minutes now) {
                                                 10, 8));
     add_resource(std::make_shared<RelaxZone>(resources_.next_id(), "Зона отдыха (кафе)", Money::from_double(40),
                                              30));
+    seed_extra_resources();
+    seed_default_products();
+    log_activity(now, "Созданы демонстрационные данные");
 }
 
 }  // namespace gc

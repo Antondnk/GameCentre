@@ -33,6 +33,7 @@ public:
     ResourceStatus status() const { return status_; }
     void set_status(ResourceStatus status) { status_ = status; }
     Minutes occupied_until() const { return occupied_until_; }
+    void set_base_price(Money price);
     void occupy_until(Minutes until);
     void release();
 
@@ -169,6 +170,54 @@ public:
     std::string price_unit() const override { return "за час"; }
     Money calculate_cost(const TimeSlot& slot, int guests) const override;
     int event_priority() const override { return 2; }
+};
+
+// VR-арена: цена за человека в час.
+class VRZone : public ActiveZone {
+public:
+    VRZone(int id, std::string name, Money price_per_person_hour, int min_age, int max_age, int capacity,
+           int headsets);
+
+    std::string kind() const override { return "VR-арена"; }
+    std::string type_tag() const override { return "VR"; }
+    std::string describe() const override;
+
+protected:
+    std::vector<std::string> extra_fields() const override;
+
+private:
+    int headsets_;
+};
+
+// Игровые консоли (PlayStation / Xbox): фиксированная цена за час на всю зону.
+class ConsoleZone : public Resource {
+public:
+    ConsoleZone(int id, std::string name, Money price_per_hour, int capacity, std::string model);
+
+    std::string kind() const override { return "Консоли"; }
+    std::string type_tag() const override { return "CONSOLE"; }
+    std::string price_unit() const override { return "за час"; }
+    Money calculate_cost(const TimeSlot& slot, int guests) const override;
+    int event_priority() const override { return 1; }
+    std::string describe() const override;
+
+protected:
+    std::vector<std::string> extra_fields() const override;
+
+private:
+    std::string model_;
+};
+
+// Бильярдный стол: цена за час.
+class BilliardsTable : public Resource {
+public:
+    BilliardsTable(int id, std::string name, Money price_per_hour, int capacity);
+
+    std::string kind() const override { return "Бильярд"; }
+    std::string type_tag() const override { return "BILLIARD"; }
+    std::string price_unit() const override { return "за час"; }
+    Money calculate_cost(const TimeSlot& slot, int guests) const override;
+    int event_priority() const override { return 1; }
 };
 
 // Фабрика: восстановление ресурса из полей строки файла.

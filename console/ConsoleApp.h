@@ -74,6 +74,7 @@ private:
     void add_resource();
     void remove_resource();
     void create_staff();
+    void save_report();
 
     void print_timeline(const EventTimeline& timeline);
     std::shared_ptr<Client> current_client() const;

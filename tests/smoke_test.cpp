@@ -2,9 +2,11 @@
 #include <filesystem>
 #include <iostream>
 
+#include "Analytics.h"
 #include "EventPlanner.h"
 #include "Exceptions.h"
 #include "GameCenter.h"
+#include "Report.h"
 #include "Sha256.h"
 
 namespace {
@@ -75,6 +77,39 @@ int main() {
               [&] { center.create_event_booking(kid->id(), "x", timeline, 8, 12, now); }),
           "minor organizer");
 
+    // Магазин: покупка уменьшает остаток и баланс, нехватка товара и денег - исключения.
+    const auto cola = center.products().find_all([](const Product& p) { return p.name() == "Cola 0.5 л"; }).front();
+    const int stock_before = cola->stock();
+    const auto adult_client = center.get_client(adult->id());
+    const Money balance_before = adult_client->balance();
+    const Money paid = center.buy_product(adult->id(), cola->id(), 2, now);
+    check(cola->stock() == stock_before - 2, "stock decreased");
+    check(adult_client->balance() == balance_before - paid, "balance decreased by purchase");
+    check(throws<OutOfStockException>([&] { center.buy_product(adult->id(), cola->id(), 100000, now); }),
+          "out of stock");
+    check(throws<InsufficientFundsException>(
+              [&] { center.buy_product(kid->id(), cola->id(), 45, now); }),
+          "shop insufficient funds");
+
+    // Лояльность: после больших трат уровень растёт.
+    check(center.loyalty_level(adult->id()).discount_percent >= 0, "loyalty level");
+    center.deposit(adult->id(), Money::from_double(2000), now);
+    const auto big = center.create_booking(adult->id(), 13, TimeSlot(timeutil::parse_datetime("2026-11-20 10:00"), 600),
+                                           5, now);
+    check(center.loyalty_level(adult->id()).spent >= big->price(), "spent grows");
+
+    // Аналитика согласована с журналом транзакций.
+    const AnalyticsReport analytics = compute_analytics(center, now, 7);
+    check(analytics.revenue_total == center.transactions().total_revenue(), "analytics revenue");
+    check(analytics.orders_count == 1, "analytics orders");
+    check(!analytics.revenue_by_category.empty(), "analytics categories");
+    check(build_text_report(center, now).find("ОТЧЁТ") != std::string::npos, "text report");
+    check(build_transactions_csv(center).find("id;time") == 0, "csv header");
+
+    // Новые виды ресурсов присутствуют.
+    const auto vr = center.resources().find_all([](const Resource& r) { return r.type_tag() == "VR"; });
+    check(!vr.empty(), "vr zones seeded");
+
     // Сохранение и загрузка.
     const std::string dir = (std::filesystem::temp_directory_path() / "gc_smoke").string();
     center.save_all(dir);
@@ -83,6 +118,16 @@ int main() {
     check(loaded.resources().size() == center.resources().size(), "resources persisted");
     check(loaded.bookings().size() == center.bookings().size(), "bookings persisted");
     check(loaded.authenticate("owner", "owner123")->get_role() == Role::Owner, "login after load");
+    check(loaded.products().size() == center.products().size(), "products persisted");
+    check(loaded.orders().size() == center.orders().size(), "orders persisted");
+    check(loaded.activity_log().size() == center.activity_log().size(), "activity persisted");
+
+    // Миграция: данные старой версии (без products.txt) получают новые зоны и товары.
+    std::filesystem::remove(std::filesystem::path(dir) / "products.txt");
+    std::filesystem::remove(std::filesystem::path(dir) / "orders.txt");
+    GameCenter migrated;
+    check(migrated.load_all(dir), "load old data");
+    check(!migrated.products().empty(), "migration adds products");
     std::filesystem::remove_all(dir);
 
     if (failures == 0) {

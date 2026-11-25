@@ -69,6 +69,12 @@ public:
     using GameCenterException::GameCenterException;
 };
 
+// Товара нет на складе в нужном количестве.
+class OutOfStockException : public GameCenterException {
+public:
+    using GameCenterException::GameCenterException;
+};
+
 class EventPlanningException : public GameCenterException {
 public:
     using GameCenterException::GameCenterException;

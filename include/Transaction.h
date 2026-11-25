@@ -17,7 +17,7 @@ std::string to_string(TransactionType type);
 class Transaction {
 public:
     Transaction(int id, int client_id, Minutes timestamp, TransactionType type, Money amount,
-                std::string description);
+                std::string description, std::string category = "other");
 
     int id() const { return id_; }
     int client_id() const { return client_id_; }
@@ -25,6 +25,8 @@ public:
     TransactionType type() const { return type_; }
     const Money& amount() const { return amount_; }
     const std::string& description() const { return description_; }
+    // session / booking / event / shop / other
+    const std::string& category() const { return category_; }
 
     std::string serialize() const;
 
@@ -35,6 +37,7 @@ private:
     TransactionType type_;
     Money amount_;
     std::string description_;
+    std::string category_;
 };
 
 std::shared_ptr<Transaction> make_transaction(const std::vector<std::string>& fields);
@@ -43,7 +46,7 @@ std::shared_ptr<Transaction> make_transaction(const std::vector<std::string>& fi
 class TransactionLog {
 public:
     void record(int client_id, Minutes timestamp, TransactionType type, const Money& amount,
-                const std::string& description);
+                const std::string& description, const std::string& category = "other");
     // Выручка = списания - возвраты.
     Money total_revenue() const;
     const Repository<Transaction>& entries() const { return entries_; }

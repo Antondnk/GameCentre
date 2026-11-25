@@ -42,6 +42,13 @@ Resource::Resource(int id, std::string name, Money base_price, int min_age, int 
     }
 }
 
+void Resource::set_base_price(Money price) {
+    if (price.cents() < 0) {
+        throw InvalidInputException("Цена не может быть отрицательной");
+    }
+    base_price_ = price;
+}
+
 void Resource::occupy_until(Minutes until) {
     status_ = ResourceStatus::Occupied;
     occupied_until_ = until;
@@ -169,6 +176,43 @@ Money RelaxZone::calculate_cost(const TimeSlot& slot, int /*guests*/) const {
     return base_price() * slot.hours();
 }
 
+// ------------------------------------------------------ VR / консоли / бильярд
+
+VRZone::VRZone(int id, std::string name, Money price_per_person_hour, int min_age, int max_age, int capacity,
+               int headsets)
+    : ActiveZone(id, std::move(name), price_per_person_hour, min_age, max_age, capacity), headsets_(headsets) {}
+
+std::string VRZone::describe() const {
+    return ActiveZone::describe() + ", VR-шлемов: " + std::to_string(headsets_);
+}
+
+std::vector<std::string> VRZone::extra_fields() const {
+    return {std::to_string(headsets_)};
+}
+
+ConsoleZone::ConsoleZone(int id, std::string name, Money price_per_hour, int capacity, std::string model)
+    : Resource(id, std::move(name), price_per_hour, 6, 120, capacity),
+      model_(util::sanitize_field(std::move(model))) {}
+
+Money ConsoleZone::calculate_cost(const TimeSlot& slot, int /*guests*/) const {
+    return base_price() * slot.hours();
+}
+
+std::string ConsoleZone::describe() const {
+    return Resource::describe() + ", " + model_;
+}
+
+std::vector<std::string> ConsoleZone::extra_fields() const {
+    return {model_};
+}
+
+BilliardsTable::BilliardsTable(int id, std::string name, Money price_per_hour, int capacity)
+    : Resource(id, std::move(name), price_per_hour, 10, 120, capacity) {}
+
+Money BilliardsTable::calculate_cost(const TimeSlot& slot, int /*guests*/) const {
+    return base_price() * slot.hours();
+}
+
 // ------------------------------------------------------------------ Фабрика
 
 namespace {
@@ -213,6 +257,15 @@ std::shared_ptr<Resource> make_resource(const std::vector<std::string>& fields) 
         require_fields(fields, kCommon + 1);
         resource = std::make_shared<ClimbingWall>(id, name, price, min_age, max_age, capacity,
                                                   util::parse_int(fields[9], "wall_height"));
+    } else if (tag == "VR") {
+        require_fields(fields, kCommon + 1);
+        resource = std::make_shared<VRZone>(id, name, price, min_age, max_age, capacity,
+                                            util::parse_int(fields[9], "headsets"));
+    } else if (tag == "CONSOLE") {
+        require_fields(fields, kCommon + 1);
+        resource = std::make_shared<ConsoleZone>(id, name, price, capacity, fields[9]);
+    } else if (tag == "BILLIARD") {
+        resource = std::make_shared<BilliardsTable>(id, name, price, capacity);
     } else if (tag == "RELAX") {
         resource = std::make_shared<RelaxZone>(id, name, price, capacity);
     } else {

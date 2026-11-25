@@ -27,12 +27,8 @@ if(BUILD_GUI)
     find_package(QT NAMES Qt6 Qt5 COMPONENTS Widgets QUIET)
     if(QT_FOUND)
         find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
-        add_executable(gamecenter_gui
-            gui/main_gui.cpp
-            gui/LoginDialog.cpp gui/LoginDialog.h
-            gui/MainWindow.cpp gui/MainWindow.h
-            gui/TimelineView.cpp gui/TimelineView.h
-            gui/Theme.cpp gui/Theme.h)
+        file(GLOB GUI_SOURCES CONFIGURE_DEPENDS gui/*.cpp gui/*.h)
+        add_executable(gamecenter_gui ${GUI_SOURCES})
         set_target_properties(gamecenter_gui PROPERTIES AUTOMOC ON)
         target_include_directories(gamecenter_gui PRIVATE gui)
         target_link_libraries(gamecenter_gui PRIVATE gamecenter_core Qt${QT_VERSION_MAJOR}::Widgets)

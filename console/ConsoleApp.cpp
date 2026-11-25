@@ -1,8 +1,11 @@
 #include "ConsoleApp.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 
 #include "Exceptions.h"
+#include "Report.h"
 #include "Utils.h"
 
 namespace gc {
@@ -135,6 +138,7 @@ std::vector<ConsoleApp::MenuItem> ConsoleApp::staff_items(bool is_owner) {
         items.push_back({13, "Добавить ресурс", [this] { add_resource(); }});
         items.push_back({14, "Удалить ресурс", [this] { remove_resource(); }});
         items.push_back({15, "Создать сотрудника", [this] { create_staff(); }});
+        items.push_back({16, "Сохранить текстовый отчёт", [this] { save_report(); }});
     }
     items.push_back({0, "Выйти из аккаунта", [this] { logout(); }});
     return items;
@@ -403,6 +407,16 @@ void ConsoleApp::create_staff() {
     const std::string full_name = read_line("ФИО: ");
     center_.create_staff(type == 2 ? Role::Owner : Role::Administrator, login_name, password, full_name);
     out_ << "Сотрудник создан.\n";
+}
+
+void ConsoleApp::save_report() {
+    const std::string path = (std::filesystem::path(data_dir_) / "report.txt").string();
+    std::ofstream file(path, std::ios::trunc);
+    if (!file) {
+        throw FileFormatException("Не удалось записать файл " + path);
+    }
+    file << build_text_report(center_, now());
+    out_ << "Отчёт сохранён: " << path << "\n";
 }
 
 }  // namespace gc

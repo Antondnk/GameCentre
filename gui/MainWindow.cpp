@@ -5,16 +5,15 @@
 #include <QDateEdit>
 #include <QDateTime>
 #include <QDateTimeEdit>
-#include <QDialog>
-#include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QHeaderView>
+#include <QIcon>
 #include <QInputDialog>
+#include <QLineEdit>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
@@ -28,129 +27,25 @@
 
 #include <algorithm>
 
+#include "Analytics.h"
+#include "ChartWidget.h"
+#include "Dialogs.h"
 #include "Exceptions.h"
+#include "GuiUtils.h"
+#include "Icons.h"
+#include "Theme.h"
 #include "TimeUtils.h"
 #include "TimelineView.h"
 
 namespace {
 
-QString qs(const std::string& text) {
-    return QString::fromUtf8(text.c_str());
-}
-
-QString money_text(const gc::Money& money) {
-    return qs(money.to_string());
-}
-
-// QDateTime -> минуты ядра (локальное время без часовых поясов).
-gc::Minutes to_minutes(const QDateTime& value) {
-    const QDate date = value.date();
-    const QTime time = value.time();
-    return gc::timeutil::days_from_civil(date.year(), static_cast<unsigned>(date.month()),
-                                         static_cast<unsigned>(date.day())) *
-               gc::kMinutesPerDay +
-           time.hour() * 60 + time.minute();
-}
-
-long long to_day_index(const QDate& date) {
-    return gc::timeutil::days_from_civil(date.year(), static_cast<unsigned>(date.month()),
-                                         static_cast<unsigned>(date.day()));
-}
-
-void set_cell(QTableWidget* table, int row, int column, const QString& text) {
-    table->setItem(row, column, new QTableWidgetItem(text));
-}
-
-QTableWidget* make_table(QWidget* parent, const QStringList& headers) {
-    auto* table = new QTableWidget(parent);
-    table->setColumnCount(headers.size());
-    table->setHorizontalHeaderLabels(headers);
-    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    table->setSelectionMode(QAbstractItemView::SingleSelection);
-    table->setAlternatingRowColors(true);
-    table->horizontalHeader()->setStretchLastSection(true);
-    return table;
-}
-
-QLabel* make_section_title(const QString& text, QWidget* parent) {
-    auto* label = new QLabel(text, parent);
-    label->setObjectName("sectionTitle");
-    return label;
-}
-
-// Цвет рамки кнопки ресурса зависит от статуса.
-QString status_color(gc::ResourceStatus status) {
-    switch (status) {
-        case gc::ResourceStatus::Free:
-            return "#2ecc71";
-        case gc::ResourceStatus::Occupied:
-            return "#ef5350";
-        case gc::ResourceStatus::Booked:
-            return "#fbc02d";
-        case gc::ResourceStatus::Maintenance:
-            return "#7b8094";
-    }
-    return "#7b8094";
-}
-
 QString zone_button_style(gc::ResourceStatus status) {
-    const QString color = status_color(status);
-    return "QPushButton { background-color: #1a1d29; border: 2px solid " + color +
-           "; border-radius: 12px; color: #e6e8f0; font-weight: bold; }"
-           "QPushButton:hover { background-color: #262b40; }";
+    const Palette& palette = current_palette();
+    const QString color = status_color_hex(static_cast<int>(status));
+    return "QPushButton { background-color: " + palette.panel + "; border: 2px solid " + color +
+           "; border-radius: 12px; color: " + palette.text + "; font-weight: bold; text-align: left; padding: 6px 10px; }"
+           "QPushButton:hover { background-color: " + palette.hover + "; }";
 }
-
-// Диалог параметров брони: ресурс, начало, длительность, число участников.
-class BookingDialog : public QDialog {
-public:
-    BookingDialog(const gc::GameCenter& center, int preselected_resource_id, QWidget* parent) : QDialog(parent) {
-        setWindowTitle("Бронирование");
-        setMinimumWidth(380);
-        auto* form = new QFormLayout(this);
-
-        resource_ = new QComboBox(this);
-        int index = 0;
-        for (const auto& resource : center.resources().values()) {
-            resource_->addItem(qs(resource->name()) + "  (" + qs(resource->kind()) + ")", resource->id());
-            if (resource->id() == preselected_resource_id) {
-                resource_->setCurrentIndex(index);
-            }
-            ++index;
-        }
-        start_ = new QDateTimeEdit(QDateTime::currentDateTime().addSecs(3600), this);
-        start_->setCalendarPopup(true);
-        start_->setDisplayFormat("yyyy-MM-dd HH:mm");
-        minutes_ = new QSpinBox(this);
-        minutes_->setRange(30, 600);
-        minutes_->setSingleStep(30);
-        minutes_->setValue(60);
-        minutes_->setSuffix(" мин");
-        guests_ = new QSpinBox(this);
-        guests_->setRange(1, 100);
-
-        form->addRow("Ресурс:", resource_);
-        form->addRow("Начало:", start_);
-        form->addRow("Длительность:", minutes_);
-        form->addRow("Участников:", guests_);
-
-        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-        form->addRow(buttons);
-        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    }
-
-    int resource_id() const { return resource_->currentData().toInt(); }
-    gc::Minutes start() const { return to_minutes(start_->dateTime()); }
-    int minutes() const { return minutes_->value(); }
-    int guests() const { return guests_->value(); }
-
-private:
-    QComboBox* resource_ = nullptr;
-    QDateTimeEdit* start_ = nullptr;
-    QSpinBox* minutes_ = nullptr;
-    QSpinBox* guests_ = nullptr;
-};
 
 }  // namespace
 
@@ -159,8 +54,10 @@ private:
 MainWindow::MainWindow(gc::GameCenter& center, std::shared_ptr<gc::User> user, std::string data_dir,
                        QWidget* parent)
     : QMainWindow(parent), center_(center), user_(std::move(user)), data_dir_(std::move(data_dir)) {
+    settings_path_ = settings_file_path(data_dir_);
+    settings_ = AppSettings::load(settings_path_);
     setWindowTitle("Информационная система игрового центра");
-    resize(1280, 780);
+    resize(1360, 820);
 
     auto* central = new QWidget(this);
     auto* root = new QHBoxLayout(central);
@@ -169,13 +66,13 @@ MainWindow::MainWindow(gc::GameCenter& center, std::shared_ptr<gc::User> user, s
 
     sidebar_ = new QFrame(central);
     sidebar_->setObjectName("sidebar");
-    sidebar_->setFixedWidth(230);
+    sidebar_->setFixedWidth(240);
     nav_layout_ = new QVBoxLayout(sidebar_);
     nav_layout_->setContentsMargins(12, 8, 12, 12);
     nav_layout_->setSpacing(4);
-    auto* logo = new QLabel("GAME CENTER", sidebar_);
-    logo->setObjectName("logo");
-    nav_layout_->addWidget(logo);
+    logo_label_ = new QLabel(settings_.club_name, sidebar_);
+    logo_label_->setObjectName("logo");
+    nav_layout_->addWidget(logo_label_);
 
     auto* content = new QWidget(central);
     auto* content_layout = new QVBoxLayout(content);
@@ -194,22 +91,29 @@ MainWindow::MainWindow(gc::GameCenter& center, std::shared_ptr<gc::User> user, s
     build_timeline_page();
     if (is_client()) {
         build_event_page();
+        build_shop_page();
+        build_profile_page();
     } else {
         build_clients_page();
+        build_resources_page();
+        build_stock_page();
+        build_activity_page();
+        if (is_owner()) {
+            build_analytics_page();
+            build_finance_page();
+            build_reports_page();
+        }
     }
-    if (is_owner()) {
-        build_finance_page();
-    }
+    build_settings_page();
     nav_layout_->addStretch();
 
-    // Обновление карты зала по таймеру (освобождение ресурсов по окончании сеанса).
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, [this] {
         refresh_hall_map();
         refresh_header();
-        refresh_dashboard();
+        timeline_->update();
     });
-    timer_->start(5000);
+    timer_->start(settings_.refresh_sec * 1000);
 
     show_page(0);
 }
@@ -244,22 +148,35 @@ void MainWindow::build_header(QVBoxLayout* content_layout) {
     content_layout->addLayout(header);
 }
 
-void MainWindow::add_page(const QString& title, QWidget* page) {
+void MainWindow::add_page(const QString& title, const QString& icon_tag, QWidget* page) {
     const int index = stack_->addWidget(page);
-    auto* button = new QPushButton(title, sidebar_);
+    auto* button = new QPushButton("  " + title, sidebar_);
     button->setObjectName("navButton");
     button->setCheckable(true);
     button->setAutoExclusive(true);
+    button->setIconSize(QSize(22, 22));
     nav_layout_->addWidget(button);
     nav_buttons_.push_back(button);
     page_titles_.push_back(title);
+    page_icons_.push_back(icon_tag);
     connect(button, &QPushButton::clicked, this, [this, index] { show_page(index); });
 }
 
+void MainWindow::update_nav_icons() {
+    const Palette& palette = current_palette();
+    for (std::size_t i = 0; i < nav_buttons_.size(); ++i) {
+        const bool active = static_cast<int>(i) == current_page_;
+        nav_buttons_[i]->setIcon(
+            make_icon(page_icons_[i], QColor(active ? palette.accent : palette.muted), 22));
+    }
+}
+
 void MainWindow::show_page(int index) {
+    current_page_ = index;
     stack_->setCurrentIndex(index);
     nav_buttons_[static_cast<std::size_t>(index)]->setChecked(true);
     page_title_->setText(page_titles_[static_cast<std::size_t>(index)]);
+    update_nav_icons();
     refresh_all();
 }
 
@@ -274,45 +191,56 @@ void MainWindow::build_dashboard_page() {
         const char* key;
         const char* caption;
         const char* color;
+        const char* icon;
     };
-    std::vector<CardDef> cards = {{"free", "Свободно", "#2ecc71"},
-                                  {"occupied", "Занято", "#ef5350"},
-                                  {"booked", "Забронировано", "#fbc02d"},
-                                  {"maintenance", "На обслуживании", "#9aa0b5"},
-                                  {"today", "Броней на сегодня", "#4c6fff"}};
+    std::vector<CardDef> cards = {{"free", "Свободно", "#2ecc71", "MAP"},
+                                  {"occupied", "Занято", "#ef5350", "PC"},
+                                  {"booked", "Забронировано", "#fbc02d", "CALENDAR"},
+                                  {"maintenance", "На обслуживании", "#9aa0b5", "SETTINGS"},
+                                  {"today", "Броней на сегодня", "#4c6fff", "LIST"}};
     if (is_client()) {
-        cards.push_back({"mine", "Мои брони", "#e6e8f0"});
+        cards.push_back({"mine", "Мои брони", "#7c4dff", "STAR"});
+        cards.push_back({"level", "Уровень", "#fbc02d", "STAR"});
     } else {
-        cards.push_back({"clients", "Клиентов", "#e6e8f0"});
+        cards.push_back({"clients", "Клиентов", "#7c4dff", "CLIENTS"});
+        cards.push_back({"orders", "Покупок в магазине", "#fbc02d", "CART"});
     }
     if (is_owner()) {
-        cards.push_back({"revenue", "Выручка", "#2ecc71"});
+        cards.push_back({"revenue", "Выручка", "#2ecc71", "COINS"});
     }
 
     auto* grid = new QGridLayout();
     grid->setSpacing(12);
     int index = 0;
     for (const CardDef& def : cards) {
-        auto* card = new QFrame(page);
-        card->setObjectName("card");
-        auto* card_layout = new QVBoxLayout(card);
-        auto* caption = new QLabel(QString::fromUtf8(def.caption), card);
-        caption->setObjectName("cardCaption");
-        auto* value = new QLabel("0", card);
-        value->setObjectName("cardValue");
-        value->setStyleSheet(QString("color: ") + QString::fromUtf8(def.color) + ";");
-        card_layout->addWidget(caption);
-        card_layout->addWidget(value);
+        QLabel* value = nullptr;
+        QFrame* card = make_card(page, QString::fromUtf8(def.caption), QString::fromUtf8(def.color),
+                                 QString::fromUtf8(def.icon), &value);
         grid->addWidget(card, index / 4, index % 4);
         stat_values_[def.key] = value;
         ++index;
     }
     layout->addLayout(grid);
 
+    auto* middle = new QHBoxLayout();
+    dash_revenue_chart_ = new ChartWidget(page);
+    dash_revenue_chart_->setMinimumHeight(190);
+    dash_hours_chart_ = new ChartWidget(page);
+    dash_hours_chart_->setMinimumHeight(190);
+    if (is_owner()) {
+        dash_revenue_chart_->set_title("Выручка за 7 дней, BYN");
+        middle->addWidget(dash_revenue_chart_, 1);
+    } else {
+        dash_revenue_chart_->hide();
+    }
+    dash_hours_chart_->set_title("Загрузка по часам (начало броней)");
+    middle->addWidget(dash_hours_chart_, 1);
+    layout->addLayout(middle);
+
     layout->addWidget(make_section_title("Ближайшие бронирования", page));
     upcoming_table_ = make_table(page, {"Начало", "Тип", "Ресурсы", "Клиент"});
     layout->addWidget(upcoming_table_, 1);
-    add_page("Рабочий стол", page);
+    add_page("Рабочий стол", "DASH", page);
 }
 
 void MainWindow::build_map_page() {
@@ -330,13 +258,22 @@ void MainWindow::build_map_page() {
     legend->setObjectName("muted");
     layout->addWidget(legend);
 
-    auto* scroll = new QScrollArea(page);
-    scroll->setWidgetResizable(true);
-    auto* inner = new QWidget(scroll);
+    map_scroll_ = new QScrollArea(page);
+    map_scroll_->setWidgetResizable(true);
+    layout->addWidget(map_scroll_, 1);
+    build_zone_buttons();
+    add_page("Карта зала", "MAP", page);
+}
+
+// Пересоздаёт кнопки зон (вызывается при создании страницы и после добавления/удаления ресурсов).
+void MainWindow::build_zone_buttons() {
+    zone_buttons_.clear();
+    zone_state_cache_.clear();
+    auto* inner = new QWidget();
     auto* inner_layout = new QVBoxLayout(inner);
 
     std::map<std::string, std::pair<QGridLayout*, int>> grids;
-    constexpr int kColumns = 5;
+    constexpr int kColumns = 4;
     for (const auto& resource : center_.resources().values()) {
         auto found = grids.find(resource->kind());
         if (found == grids.end()) {
@@ -347,7 +284,8 @@ void MainWindow::build_map_page() {
             found = grids.emplace(resource->kind(), std::make_pair(grid, 0)).first;
         }
         auto* button = new QPushButton(inner);
-        button->setMinimumSize(150, 70);
+        button->setMinimumSize(210, 78);
+        button->setIconSize(QSize(40, 40));
         const int index = found->second.second++;
         found->second.first->addWidget(button, index / kColumns, index % kColumns);
 
@@ -356,9 +294,7 @@ void MainWindow::build_map_page() {
         zone_buttons_[resource_id] = button;
     }
     inner_layout->addStretch();
-    scroll->setWidget(inner);
-    layout->addWidget(scroll, 1);
-    add_page("Карта зала", page);
+    map_scroll_->setWidget(inner);
 }
 
 void MainWindow::build_timeline_page() {
@@ -418,7 +354,7 @@ void MainWindow::build_timeline_page() {
             [this] { timeline_date_->setDate(timeline_date_->date().addDays(1)); });
     connect(today, &QPushButton::clicked, this, [this] { timeline_date_->setDate(QDate::currentDate()); });
 
-    add_page(is_client() ? "Бронирование" : "Все бронирования", page);
+    add_page("Бронирование", "CALENDAR", page);
 }
 
 void MainWindow::build_event_page() {
@@ -476,39 +412,7 @@ void MainWindow::build_event_page() {
     book_event_button_->setEnabled(false);
     connect(book_event_button_, &QPushButton::clicked, this, [this] { on_book_event_clicked(); });
     layout->addWidget(book_event_button_);
-    add_page("Конструктор праздника", page);
-}
-
-void MainWindow::build_clients_page() {
-    auto* page = new QWidget(stack_);
-    auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(0, 0, 0, 0);
-    clients_table_ = make_table(page, {"ID", "Логин", "ФИО", "Возраст", "Баланс", "Скидка"});
-    layout->addWidget(clients_table_, 1);
-
-    auto* buttons = new QHBoxLayout();
-    auto* deposit = new QPushButton("Пополнить счёт", page);
-    deposit->setObjectName("accent");
-    auto* discount = new QPushButton("Задать скидку", page);
-    connect(deposit, &QPushButton::clicked, this, [this] { on_client_deposit_clicked(); });
-    connect(discount, &QPushButton::clicked, this, [this] { on_client_discount_clicked(); });
-    buttons->addStretch();
-    buttons->addWidget(deposit);
-    buttons->addWidget(discount);
-    layout->addLayout(buttons);
-    add_page("Клиенты", page);
-}
-
-void MainWindow::build_finance_page() {
-    auto* page = new QWidget(stack_);
-    auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(0, 0, 0, 0);
-    transactions_table_ = make_table(page, {"№", "Время", "Клиент", "Тип", "Сумма", "Описание"});
-    layout->addWidget(transactions_table_, 1);
-    revenue_label_ = new QLabel(page);
-    revenue_label_->setObjectName("sectionTitle");
-    layout->addWidget(revenue_label_);
-    add_page("Финансы", page);
+    add_page("Конструктор праздника", "GIFT", page);
 }
 
 // ------------------------------------------------------------------ обновление
@@ -519,11 +423,29 @@ void MainWindow::refresh_all() {
     refresh_hall_map();
     refresh_bookings();
     timeline_->reload();
+    if (shop_list_) {
+        refresh_shop();
+    }
+    if (history_table_) {
+        refresh_profile();
+    }
+    if (stock_table_) {
+        refresh_stock();
+    }
     if (clients_table_) {
         refresh_clients();
     }
+    if (resources_table_) {
+        refresh_resources();
+    }
     if (transactions_table_) {
         refresh_transactions();
+    }
+    if (chart_days_) {
+        refresh_analytics();
+    }
+    if (activity_edit_) {
+        refresh_activity();
     }
 }
 
@@ -560,6 +482,10 @@ QString MainWindow::booking_resource_names(const gc::Booking& booking) const {
     return names.join(", ");
 }
 
+QString MainWindow::data_path(const QString& file_name) const {
+    return QString::fromStdString(data_dir_) + "/" + file_name;
+}
+
 void MainWindow::refresh_dashboard() {
     const gc::Minutes now = gc::timeutil::now_minutes();
     int counts[4] = {0, 0, 0, 0};
@@ -583,7 +509,9 @@ void MainWindow::refresh_dashboard() {
     }
     set_stat("today", QString::number(today_count));
     set_stat("mine", QString::number(bookings.size()));
-    if (!is_client()) {
+    if (is_client()) {
+        set_stat("level", qs(center_.loyalty_level(user_->id()).name));
+    } else {
         int clients = 0;
         for (const auto& user : center_.users().values()) {
             if (user->get_role() == gc::Role::Client) {
@@ -591,10 +519,28 @@ void MainWindow::refresh_dashboard() {
             }
         }
         set_stat("clients", QString::number(clients));
+        set_stat("orders", QString::number(center_.orders().size()));
     }
     if (is_owner()) {
         set_stat("revenue", money_text(center_.transactions().total_revenue()));
     }
+
+    // Графики рабочего стола.
+    const gc::AnalyticsReport analytics = gc::compute_analytics(center_, now, 7);
+    if (is_owner()) {
+        std::vector<ChartWidget::Bar> bars;
+        for (const gc::DailyValue& day : analytics.revenue_by_day) {
+            const QDate date = QDate(1970, 1, 1).addDays(static_cast<int>(day.day));
+            bars.push_back({date.toString("dd.MM"), day.value, QString::number(day.value, 'f', 1)});
+        }
+        dash_revenue_chart_->set_data(std::move(bars));
+    }
+    std::vector<ChartWidget::Bar> hours;
+    for (int hour = 8; hour < 24; ++hour) {
+        const int count = analytics.bookings_by_hour[static_cast<std::size_t>(hour)];
+        hours.push_back({QString::number(hour), static_cast<double>(count), QString::number(count)});
+    }
+    dash_hours_chart_->set_data(std::move(hours));
 
     // Ближайшие (ещё не закончившиеся) брони по возрастанию времени начала.
     bookings.erase(std::remove_if(bookings.begin(), bookings.end(),
@@ -622,13 +568,22 @@ void MainWindow::refresh_dashboard() {
 void MainWindow::refresh_hall_map() {
     const gc::Minutes now = gc::timeutil::now_minutes();
     center_.refresh_statuses(now);
+    const Palette& palette = current_palette();
     for (const auto& entry : zone_buttons_) {
         const auto resource = center_.resources().find(entry.first);
         if (!resource) {
             continue;
         }
         const gc::ResourceStatus status = center_.get_device_status(entry.first, now);
-        entry.second->setText(qs(resource->name()) + "\n" + qs(gc::to_string(status)));
+        const QString text = qs(resource->name()) + "\n" + qs(gc::to_string(status)) + " · " +
+                             money_text(resource->base_price()) + "/" + qs(resource->price_unit());
+        const QString state = text + status_color_hex(static_cast<int>(status)) + palette.panel;
+        if (zone_state_cache_[entry.first] == state) {
+            continue;  // ничего не изменилось - не перерисовываем
+        }
+        zone_state_cache_[entry.first] = state;
+        entry.second->setText(text);
+        entry.second->setIcon(make_icon(icon_tag_for(*resource), QColor(status_color_hex(static_cast<int>(status))), 40));
         entry.second->setStyleSheet(zone_button_style(status));
     }
 }
@@ -652,44 +607,6 @@ void MainWindow::refresh_bookings() {
     }
 }
 
-void MainWindow::refresh_clients() {
-    const gc::Minutes now = gc::timeutil::now_minutes();
-    std::vector<std::shared_ptr<gc::Client>> clients;
-    for (const auto& user : center_.users().values()) {
-        if (auto client = std::dynamic_pointer_cast<gc::Client>(user)) {
-            clients.push_back(client);
-        }
-    }
-    clients_table_->setRowCount(static_cast<int>(clients.size()));
-    for (std::size_t i = 0; i < clients.size(); ++i) {
-        const auto& client = clients[i];
-        const int row = static_cast<int>(i);
-        set_cell(clients_table_, row, 0, QString::number(client->id()));
-        set_cell(clients_table_, row, 1, qs(client->login()));
-        set_cell(clients_table_, row, 2, qs(client->full_name()));
-        set_cell(clients_table_, row, 3, QString::number(client->age_on(now / gc::kMinutesPerDay)));
-        set_cell(clients_table_, row, 4, money_text(client->balance()));
-        set_cell(clients_table_, row, 5, QString::number(client->discount_percent()) + "%");
-    }
-}
-
-void MainWindow::refresh_transactions() {
-    const auto entries = center_.transactions().entries().values();
-    transactions_table_->setRowCount(static_cast<int>(entries.size()));
-    for (std::size_t i = 0; i < entries.size(); ++i) {
-        const auto& entry = entries[i];
-        const int row = static_cast<int>(i);
-        const auto client = center_.users().find(entry->client_id());
-        set_cell(transactions_table_, row, 0, QString::number(entry->id()));
-        set_cell(transactions_table_, row, 1, qs(gc::timeutil::format_datetime(entry->timestamp())));
-        set_cell(transactions_table_, row, 2, client ? qs(client->login()) : QString::number(entry->client_id()));
-        set_cell(transactions_table_, row, 3, qs(gc::to_string(entry->type())));
-        set_cell(transactions_table_, row, 4, money_text(entry->amount()));
-        set_cell(transactions_table_, row, 5, qs(entry->description()));
-    }
-    revenue_label_->setText("Выручка (списания − возвраты): " + money_text(center_.transactions().total_revenue()));
-}
-
 // ------------------------------------------------------------------ обработчики
 
 void MainWindow::on_zone_clicked(int resource_id) {
@@ -700,6 +617,7 @@ void MainWindow::on_zone_clicked(int resource_id) {
 
         QMessageBox box(this);
         box.setWindowTitle(qs(resource->name()));
+        box.setIconPixmap(make_icon_pixmap(icon_tag_for(*resource), QColor(current_palette().accent), 56));
         box.setText(qs(resource->describe()) + "\n\nТекущий статус: " + qs(gc::to_string(status)));
 
         QPushButton* first = nullptr;
@@ -857,43 +775,6 @@ void MainWindow::on_book_event_clicked() {
     });
 }
 
-void MainWindow::on_client_deposit_clicked() {
-    run_guarded([this] {
-        const int id = selected_id(clients_table_);
-        if (id < 0) {
-            QMessageBox::information(this, "Пополнение", "Выберите клиента в таблице.");
-            return;
-        }
-        bool ok = false;
-        const double amount =
-            QInputDialog::getDouble(this, "Пополнение счёта", "Сумма, BYN:", 10.0, 0.01, 100000.0, 2, &ok);
-        if (!ok) {
-            return;
-        }
-        center_.deposit(id, gc::Money::from_double(amount), gc::timeutil::now_minutes());
-        commit();
-        refresh_all();
-    });
-}
-
-void MainWindow::on_client_discount_clicked() {
-    run_guarded([this] {
-        const int id = selected_id(clients_table_);
-        if (id < 0) {
-            QMessageBox::information(this, "Скидка", "Выберите клиента в таблице.");
-            return;
-        }
-        bool ok = false;
-        const int percent = QInputDialog::getInt(this, "Скидка клиента", "Скидка, % (0-50):", 0, 0, 50, 1, &ok);
-        if (!ok) {
-            return;
-        }
-        center_.get_client(id)->set_discount_percent(percent);
-        commit();
-        refresh_all();
-    });
-}
-
 // ------------------------------------------------------------------ вспомогательное
 
 void MainWindow::run_guarded(const std::function<void()>& action) {
@@ -910,6 +791,10 @@ void MainWindow::commit() {
     } catch (const std::exception& error) {
         QMessageBox::warning(this, "Ошибка сохранения", qs(error.what()));
     }
+}
+
+void MainWindow::note(const QString& text) {
+    center_.log_activity(gc::timeutil::now_minutes(), "[" + user_->login() + "] " + text.toStdString());
 }
 
 int MainWindow::selected_id(QTableWidget* table) {

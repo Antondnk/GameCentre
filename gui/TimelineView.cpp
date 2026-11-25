@@ -11,6 +11,8 @@
 
 #include <algorithm>
 
+#include "Icons.h"
+#include "Theme.h"
 #include "TimeUtils.h"
 
 namespace {
@@ -119,7 +121,8 @@ std::vector<TimelineView::Segment> TimelineView::segments_for(int resource_id) c
 void TimelineView::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.fillRect(rect(), QColor(26, 29, 41));
+    const Palette& palette = current_palette();
+    painter.fillRect(rect(), QColor(palette.panel));
     hits_.clear();
 
     const auto resources = center_.resources().values();
@@ -131,20 +134,22 @@ void TimelineView::paintEvent(QPaintEvent*) {
     for (std::size_t i = 0; i < resources.size(); ++i) {
         const int y = kHeaderHeight + static_cast<int>(i) * kRowHeight;
         if (i % 2 == 1) {
-            painter.fillRect(QRect(0, y, width(), kRowHeight), QColor(30, 34, 50));
+            painter.fillRect(QRect(0, y, width(), kRowHeight), QColor(palette.panel2));
         }
-        painter.setPen(QColor(230, 232, 240));
-        painter.drawText(QRect(12, y, kLabelWidth - 16, kRowHeight),
+        painter.drawPixmap(QRect(10, y + 7, 20, 20),
+                           make_icon_pixmap(icon_tag_for(*resources[i]), QColor(palette.muted), 20));
+        painter.setPen(QColor(palette.text));
+        painter.drawText(QRect(38, y, kLabelWidth - 42, kRowHeight),
                          static_cast<int>(Qt::AlignVCenter | Qt::AlignLeft), qs(resources[i]->name()));
     }
 
     // Вертикальные линии часов и подписи.
     for (int hour = 0; hour <= 24; ++hour) {
         const double x = kLabelWidth + hour * hour_width;
-        painter.setPen(QColor(43, 48, 68));
+        painter.setPen(QColor(palette.border));
         painter.drawLine(QPointF(x, kHeaderHeight), QPointF(x, height()));
         if (hour < 24) {
-            painter.setPen(QColor(139, 145, 167));
+            painter.setPen(QColor(palette.muted));
             painter.drawText(QRectF(x, 0, hour_width, kHeaderHeight), static_cast<int>(Qt::AlignCenter),
                              QString::number(hour));
         }
